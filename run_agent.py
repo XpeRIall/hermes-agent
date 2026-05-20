@@ -2098,6 +2098,15 @@ class AIAgent:
         except Exception:
             pass
 
+        # 6. Close optional Nova shadow recorder stores
+        try:
+            recorder = getattr(self, "_nova_recorder", None)
+            close = getattr(recorder, "close", None)
+            if callable(close):
+                close()
+        except Exception:
+            pass
+
     def _hydrate_todo_store(self, history: List[Dict[str, Any]]) -> None:
         """
         Recover todo state from conversation history.

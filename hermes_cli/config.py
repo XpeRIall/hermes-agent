@@ -554,7 +554,16 @@ DEFAULT_CONFIG = {
         "image_input_mode": "auto",
         "disabled_toolsets": [],
     },
-    
+
+    "nova": {
+        # Phase 1 trusted-kernel recorder posture.
+        # disabled: no writes and no runtime behavior changes.
+        # shadow: append compact ledger/evidence refs beside the existing runtime.
+        "mode": "disabled",
+        # Empty uses the profile-scoped default: ~/.hermes/nova/kernel.db.
+        "kernel_db_path": "",
+    },
+
     "terminal": {
         "backend": "local",
         "modal_mode": "auto",

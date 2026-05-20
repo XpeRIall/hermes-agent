@@ -61,6 +61,122 @@ def _ra():
     return run_agent
 
 
+def _nova_tool_args(tool_call, *, warn: bool = False) -> dict:
+    try:
+        args = json.loads(tool_call.function.arguments)
+    except json.JSONDecodeError as exc:
+        if warn:
+            logging.warning(f"Unexpected JSON error after validation: {exc}")
+        args = {}
+    except Exception:
+        args = {}
+    return args if isinstance(args, dict) else {}
+
+
+def _nova_record_tool_call_batch(agent, parsed_calls, effective_task_id: str, api_call_count: int):
+    recorder = getattr(agent, "_nova_recorder", None)
+    if recorder is None or not getattr(recorder, "enabled", False):
+        return None
+    try:
+        from agent.nova import ToolCallEvidence
+        return recorder.record_tool_call_batch(
+            run_id=getattr(agent, "_nova_run_id", None) or effective_task_id,
+            session_id=getattr(agent, "session_id", None),
+            api_call_count=api_call_count,
+            calls=[
+                ToolCallEvidence(
+                    tool_call_id=tc.id,
+                    tool_name=name,
+                    args=args,
+                )
+                for tc, name, args, *_ in parsed_calls
+            ],
+        )
+    except Exception as exc:
+        logger.debug("Nova tool-call recording failed: %s", exc)
+        return None
+
+
+def _nova_record_tool_result(
+    agent,
+    plan,
+    effective_task_id: str,
+    *,
+    tool_call_id: str,
+    tool_name: str,
+    args: dict,
+    result,
+    duration: float,
+    is_error: bool,
+    blocked: bool,
+    message_index: int,
+) -> None:
+    recorder = getattr(agent, "_nova_recorder", None)
+    if recorder is None or plan is None:
+        return
+    try:
+        from agent.nova import ToolResultEvidence
+        recorder.record_tool_result(
+            run_id=getattr(agent, "_nova_run_id", None) or effective_task_id,
+            session_id=getattr(agent, "session_id", None),
+            plan=plan,
+            result=ToolResultEvidence(
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                args=args,
+                result=result,
+                duration_seconds=duration,
+                is_error=is_error,
+                blocked=blocked,
+                message_index=message_index,
+            ),
+        )
+    except Exception as exc:
+        logger.debug("Nova tool-result recording failed: %s", exc)
+
+
+def _nova_queue_pending_result(
+    pending_results: list,
+    *,
+    tool_call_id: str,
+    tool_name: str,
+    args: dict,
+    duration: float,
+    is_error: bool,
+    blocked: bool,
+    message_index: int,
+) -> None:
+    pending_results.append(
+        {
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+            "args": args,
+            "duration": duration,
+            "is_error": is_error,
+            "blocked": blocked,
+            "message_index": message_index,
+        }
+    )
+
+
+def _nova_record_pending_results(agent, plan, effective_task_id: str, messages: list, pending_results: list) -> None:
+    for pending in pending_results:
+        msg_idx = pending["message_index"]
+        _nova_record_tool_result(
+            agent,
+            plan,
+            effective_task_id,
+            tool_call_id=pending["tool_call_id"],
+            tool_name=pending["tool_name"],
+            args=pending["args"],
+            result=messages[msg_idx].get("content", ""),
+            duration=pending["duration"],
+            is_error=pending["is_error"],
+            blocked=pending["blocked"],
+            message_index=msg_idx,
+        )
+
+
 def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
     """Execute multiple tool calls concurrently using a thread pool.
 
@@ -73,13 +189,42 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     # ── Pre-flight: interrupt check ──────────────────────────────────
     if agent._interrupt_requested:
         print(f"{agent.log_prefix}⚡ Interrupt: skipping {num_tools} tool call(s)")
-        for tc in tool_calls:
-            messages.append({
+        _nova_interrupted_calls = [
+            (tc, tc.function.name, _nova_tool_args(tc))
+            for tc in tool_calls
+        ]
+        _nova_plan = _nova_record_tool_call_batch(
+            agent,
+            _nova_interrupted_calls,
+            effective_task_id,
+            api_call_count,
+        )
+        _nova_pending_results = []
+        for tc, skipped_name, skipped_args in _nova_interrupted_calls:
+            tool_msg = {
                 "role": "tool",
-                "name": tc.function.name,
-                "content": f"[Tool execution cancelled — {tc.function.name} was skipped due to user interrupt]",
+                "name": skipped_name,
+                "content": f"[Tool execution cancelled — {skipped_name} was skipped due to user interrupt]",
                 "tool_call_id": tc.id,
-            })
+            }
+            messages.append(tool_msg)
+            _nova_queue_pending_result(
+                _nova_pending_results,
+                tool_call_id=tc.id,
+                tool_name=skipped_name,
+                args=skipped_args,
+                duration=0.0,
+                is_error=False,
+                blocked=True,
+                message_index=len(messages) - 1,
+            )
+        _nova_record_pending_results(
+            agent,
+            _nova_plan,
+            effective_task_id,
+            messages,
+            _nova_pending_results,
+        )
         return
 
     # ── Parse args + pre-execution bookkeeping ───────────────────────
@@ -93,12 +238,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         elif function_name == "skill_manage":
             agent._iters_since_skill = 0
 
-        try:
-            function_args = json.loads(tool_call.function.arguments)
-        except json.JSONDecodeError:
-            function_args = {}
-        if not isinstance(function_args, dict):
-            function_args = {}
+        function_args = _nova_tool_args(tool_call)
 
         # Checkpoint for file-mutating tools
         if function_name in {"write_file", "patch"} and agent._checkpoint_mgr.enabled:
@@ -173,10 +313,17 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 agent.tool_start_callback(tc.id, name, args)
             except Exception as cb_err:
                 logging.debug(f"Tool start callback error: {cb_err}")
+    _nova_plan = _nova_record_tool_call_batch(
+        agent,
+        parsed_calls,
+        effective_task_id,
+        api_call_count,
+    )
 
     # ── Concurrent execution ─────────────────────────────────────────
     # Each slot holds (function_name, function_args, function_result, duration, error_flag, blocked_flag)
     results = [None] * num_tools
+    _nova_pending_results = []
     for i, (tc, name, args, block_result, blocked_by_guardrail) in enumerate(parsed_calls):
         if block_result is not None:
             results[i] = (name, args, block_result, 0.0, True, True)
@@ -450,6 +597,16 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             "tool_call_id": tc.id,
         }
         messages.append(tool_msg)
+        _nova_queue_pending_result(
+            _nova_pending_results,
+            tool_call_id=tc.id,
+            tool_name=name,
+            args=args,
+            duration=tool_duration,
+            is_error=bool(r[4]) if r is not None else True,
+            blocked=bool(blocked),
+            message_index=len(messages) - 1,
+        )
 
         # ── Per-tool /steer drain ───────────────────────────────────
         # Same as the sequential path: drain between each collected
@@ -461,28 +618,44 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     if num_tools > 0:
         turn_tool_msgs = messages[-num_tools:]
         enforce_turn_budget(turn_tool_msgs, env=get_active_env(effective_task_id))
-
     # ── /steer injection ──────────────────────────────────────────────
     # Append any pending user steer text to the last tool result so the
     # agent sees it on its next iteration. Runs AFTER budget enforcement
     # so the steer marker is never truncated. See steer() for details.
     if num_tools > 0:
         agent._apply_pending_steer_to_tool_results(messages, num_tools)
+    _nova_record_pending_results(
+        agent,
+        _nova_plan,
+        effective_task_id,
+        messages,
+        _nova_pending_results,
+    )
 
 
 
 def execute_tool_calls_sequential(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
     """Execute tool calls sequentially (original behavior). Used for single calls or interactive tools."""
+    _nova_parsed = []
+    for _tc in assistant_message.tool_calls:
+        _args = _nova_tool_args(_tc, warn=True)
+        _nova_parsed.append((_tc, _tc.function.name, _args))
+    _nova_plan = _nova_record_tool_call_batch(
+        agent,
+        _nova_parsed,
+        effective_task_id,
+        api_call_count,
+    )
+    _nova_pending_results = []
     for i, tool_call in enumerate(assistant_message.tool_calls, 1):
         # SAFETY: check interrupt BEFORE starting each tool.
         # If the user sent "stop" during a previous tool's execution,
         # do NOT start any more tools -- skip them all immediately.
         if agent._interrupt_requested:
-            remaining_calls = assistant_message.tool_calls[i-1:]
+            remaining_calls = _nova_parsed[i-1:]
             if remaining_calls:
                 agent._vprint(f"{agent.log_prefix}⚡ Interrupt: skipping {len(remaining_calls)} tool call(s)", force=True)
-            for skipped_tc in remaining_calls:
-                skipped_name = skipped_tc.function.name
+            for skipped_tc, skipped_name, skipped_args in remaining_calls:
                 skip_msg = {
                     "role": "tool",
                     "name": skipped_name,
@@ -490,17 +663,20 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     "tool_call_id": skipped_tc.id,
                 }
                 messages.append(skip_msg)
+                _nova_queue_pending_result(
+                    _nova_pending_results,
+                    tool_call_id=skipped_tc.id,
+                    tool_name=skipped_name,
+                    args=skipped_args,
+                    duration=0.0,
+                    is_error=False,
+                    blocked=True,
+                    message_index=len(messages) - 1,
+                )
             break
 
         function_name = tool_call.function.name
-
-        try:
-            function_args = json.loads(tool_call.function.arguments)
-        except json.JSONDecodeError as e:
-            logging.warning(f"Unexpected JSON error after validation: {e}")
-            function_args = {}
-        if not isinstance(function_args, dict):
-            function_args = {}
+        function_args = _nova_parsed[i - 1][2]
 
         # Check plugin hooks for a block directive before executing.
         _block_msg: Optional[str] = None
@@ -867,6 +1043,16 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             "tool_call_id": tool_call.id
         }
         messages.append(tool_msg)
+        _nova_queue_pending_result(
+            _nova_pending_results,
+            tool_call_id=tool_call.id,
+            tool_name=function_name,
+            args=function_args,
+            duration=tool_duration,
+            is_error=_is_error_result,
+            blocked=_execution_blocked,
+            message_index=len(messages) - 1,
+        )
 
         # ── Per-tool /steer drain ───────────────────────────────────
         # Drain pending steer BETWEEN individual tool calls so the
@@ -886,8 +1072,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         if agent._interrupt_requested and i < len(assistant_message.tool_calls):
             remaining = len(assistant_message.tool_calls) - i
             agent._vprint(f"{agent.log_prefix}⚡ Interrupt: skipping {remaining} remaining tool call(s)", force=True)
-            for skipped_tc in assistant_message.tool_calls[i:]:
-                skipped_name = skipped_tc.function.name
+            for skipped_tc, skipped_name, skipped_args in _nova_parsed[i:]:
                 skip_msg = {
                     "role": "tool",
                     "name": skipped_name,
@@ -895,6 +1080,16 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     "tool_call_id": skipped_tc.id
                 }
                 messages.append(skip_msg)
+                _nova_queue_pending_result(
+                    _nova_pending_results,
+                    tool_call_id=skipped_tc.id,
+                    tool_name=skipped_name,
+                    args=skipped_args,
+                    duration=0.0,
+                    is_error=False,
+                    blocked=True,
+                    message_index=len(messages) - 1,
+                )
             break
 
         if agent.tool_delay > 0 and i < len(assistant_message.tool_calls):
@@ -904,12 +1099,18 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
     num_tools_seq = len(assistant_message.tool_calls)
     if num_tools_seq > 0:
         enforce_turn_budget(messages[-num_tools_seq:], env=get_active_env(effective_task_id))
-
     # ── /steer injection ──────────────────────────────────────────────
     # See _execute_tool_calls_parallel for the rationale. Same hook,
     # applied to sequential execution as well.
     if num_tools_seq > 0:
         agent._apply_pending_steer_to_tool_results(messages, num_tools_seq)
+    _nova_record_pending_results(
+        agent,
+        _nova_plan,
+        effective_task_id,
+        messages,
+        _nova_pending_results,
+    )
 
 
 
