@@ -923,6 +923,26 @@ def init_agent(
         )
     except Exception as _tlg_err:
         _ra().logger.warning("Tool loop guardrail config ignored: %s", _tlg_err)
+    try:
+        from agent.nova import KernelMode, NovaRecorder
+        _nova_cfg = _agent_cfg.get("nova", {}) if isinstance(_agent_cfg, dict) else {}
+        _nova_mode = KernelMode(str(_nova_cfg.get("mode", "disabled") or "disabled").lower())
+        _nova_db_path = _nova_cfg.get("kernel_db_path") or None
+        agent._nova_recorder = (
+            NovaRecorder.shadow(_nova_db_path)
+            if _nova_mode is KernelMode.SHADOW
+            else NovaRecorder.disabled()
+        )
+        agent._nova_mode = _nova_mode
+    except Exception as _nova_err:
+        _ra().logger.warning("Nova recorder config ignored: %s", _nova_err)
+        try:
+            from agent.nova import KernelMode, NovaRecorder
+            agent._nova_mode = KernelMode.DISABLED
+            agent._nova_recorder = NovaRecorder.disabled()
+        except Exception:
+            agent._nova_mode = "disabled"
+            agent._nova_recorder = None
     # Cache only the derived auxiliary compression context override that is
     # needed later by the startup feasibility check.  Avoid exposing a
     # broad pseudo-public config object on the agent instance.

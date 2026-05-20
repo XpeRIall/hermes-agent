@@ -1,6 +1,7 @@
 """Tests for interrupt handling in concurrent tool execution."""
 
 import concurrent.futures
+import json
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -75,6 +76,7 @@ def _make_agent(monkeypatch):
     stub = _Stub()
     # Bind the real methods under test
     stub._execute_tool_calls_concurrent = _ra.AIAgent._execute_tool_calls_concurrent.__get__(stub)
+    stub._execute_tool_calls_sequential = _ra.AIAgent._execute_tool_calls_sequential.__get__(stub)
     stub.interrupt = _ra.AIAgent.interrupt.__get__(stub)
     stub.clear_interrupt = _ra.AIAgent.clear_interrupt.__get__(stub)
     # /steer injection (added in PR #12116) fires after every concurrent
@@ -97,6 +99,19 @@ class _FakeAssistantMsg:
         self.tool_calls = tool_calls
 
 
+class _FakeNovaRecorder:
+    enabled = True
+
+    def __init__(self):
+        self.calls = []
+        self.results = []
+
+    def record_tool_call_batch(self, **kwargs):
+        self.calls.append(kwargs)
+        return object()
+
+    def record_tool_result(self, **kwargs):
+        self.results.append(kwargs["result"])
 
 
 def test_concurrent_preflight_interrupt_skips_all(monkeypatch):
@@ -119,6 +134,42 @@ def test_concurrent_preflight_interrupt_skips_all(monkeypatch):
     agent._invoke_tool.assert_not_called()
 
 
+def test_concurrent_preflight_interrupt_records_nova_skipped_results(monkeypatch):
+    agent = _make_agent(monkeypatch)
+    agent._interrupt_requested = True
+    recorder = _FakeNovaRecorder()
+    agent._nova_recorder = recorder
+    agent._nova_run_id = "run-1"
+
+    tc1 = _FakeToolCall("tool_a", json.dumps({"token": "secret"}), "tc_a")
+    tc2 = _FakeToolCall("tool_b", json.dumps({"path": "b.py"}), "tc_b")
+    messages = []
+
+    agent._execute_tool_calls_concurrent(_FakeAssistantMsg([tc1, tc2]), messages, "test_task")
+
+    assert [call.tool_call_id for call in recorder.calls[0]["calls"]] == ["tc_a", "tc_b"]
+    assert [result.tool_call_id for result in recorder.results] == ["tc_a", "tc_b"]
+    assert all(result.blocked for result in recorder.results)
+    assert "skipped due to user interrupt" in recorder.results[0].result
+
+
+def test_sequential_interrupt_records_nova_skipped_results(monkeypatch):
+    agent = _make_agent(monkeypatch)
+    agent._interrupt_requested = True
+    recorder = _FakeNovaRecorder()
+    agent._nova_recorder = recorder
+    agent._nova_run_id = "run-1"
+
+    tc1 = _FakeToolCall("tool_a", json.dumps({"path": "a.py"}), "tc_a")
+    tc2 = _FakeToolCall("tool_b", json.dumps({"path": "b.py"}), "tc_b")
+    messages = []
+
+    agent._execute_tool_calls_sequential(_FakeAssistantMsg([tc1, tc2]), messages, "test_task")
+
+    assert [call.tool_call_id for call in recorder.calls[0]["calls"]] == ["tc_a", "tc_b"]
+    assert [result.tool_call_id for result in recorder.results] == ["tc_a", "tc_b"]
+    assert all(result.blocked for result in recorder.results)
+    assert "skipped due to user interrupt" in recorder.results[1].result
 
 
 def test_clear_interrupt_clears_worker_tids(monkeypatch):

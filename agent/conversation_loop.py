@@ -296,7 +296,20 @@ def run_conversation(
     messages.append(user_msg)
     current_turn_user_idx = len(messages) - 1
     agent._persist_user_message_idx = current_turn_user_idx
-    
+    agent._nova_run_id = effective_task_id
+    try:
+        recorder = getattr(agent, "_nova_recorder", None)
+        if recorder is not None:
+            recorder.record_run_start(
+                run_id=effective_task_id,
+                session_id=agent.session_id,
+                user_message=original_user_message,
+                message_index=current_turn_user_idx,
+                task_id=effective_task_id,
+            )
+    except Exception as _nova_err:
+        logger.debug("Nova run-start recording failed: %s", _nova_err)
+
     if not agent.quiet_mode:
         _print_preview = _summarize_user_message_for_log(user_message)
         agent._safe_print(f"💬 Starting conversation: '{_print_preview[:60]}{'...' if len(_print_preview) > 60 else ''}'")
@@ -3773,7 +3786,6 @@ def run_conversation(
 
     # Determine if conversation completed successfully
     completed = final_response is not None and api_call_count < agent.max_iterations
-
     # Save trajectory if enabled.  ``user_message`` may be a multimodal
     # list of parts; the trajectory format wants a plain string.
     agent._save_trajectory(messages, _summarize_user_message_for_log(user_message), completed)
@@ -3896,6 +3908,22 @@ def run_conversation(
             )
         except Exception as exc:
             logger.warning("post_llm_call hook failed: %s", exc)
+
+    try:
+        recorder = getattr(agent, "_nova_recorder", None)
+        if recorder is not None:
+            recorder.record_run_end(
+                run_id=getattr(agent, "_nova_run_id", effective_task_id),
+                session_id=agent.session_id,
+                final_response=final_response or "",
+                completed=completed,
+                interrupted=interrupted,
+                exit_reason=_turn_exit_reason,
+                api_calls=api_call_count,
+                message_index=(len(messages) - 1 if messages else None),
+            )
+    except Exception as _nova_err:
+        logger.debug("Nova run-end recording failed: %s", _nova_err)
 
     # Extract reasoning from the CURRENT turn only.  Walk backwards
     # but stop at the user message that started this turn — anything

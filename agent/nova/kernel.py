@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, is_dataclass
@@ -44,6 +45,7 @@ class EvidenceRefKind(StrEnum):
     TOOL_RESULT = "tool_result"
     CHECK = "check"
     RETRIEVAL = "retrieval"
+    APPROVAL = "approval"
 
 
 class ClaimStatus(StrEnum):
@@ -154,7 +156,53 @@ def tool_args_hash(args: Mapping[str, Any] | None) -> str:
         args = {}
     if not isinstance(args, Mapping):
         raise TypeError(f"tool args must be a mapping, got {type(args).__name__}")
-    return stable_hash(args)
+    return stable_hash(_redact_for_hash(args))
+
+
+_SENSITIVE_HASH_KEYS = {
+    "accesstoken",
+    "apikey",
+    "authorization",
+    "authorizationheader",
+    "authtoken",
+    "bearer",
+    "clientsecret",
+    "credential",
+    "credentials",
+    "idtoken",
+    "keymaterial",
+    "password",
+    "passwd",
+    "rawsecret",
+    "refreshtoken",
+    "secret",
+    "secretinput",
+    "secretvalue",
+    "token",
+}
+
+
+def _redact_for_hash(value: Any, *, key: str | None = None) -> Any:
+    if key is not None and _is_sensitive_hash_key(key):
+        return "[REDACTED]"
+    if isinstance(value, Mapping):
+        return {str(k): _redact_for_hash(v, key=str(k)) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_for_hash(item) for item in value]
+    if isinstance(value, str):
+        try:
+            from agent.redact import redact_sensitive_text
+            return redact_sensitive_text(value, force=True)
+        except Exception:
+            return value
+    return value
+
+
+def _is_sensitive_hash_key(key: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+    if normalized in _SENSITIVE_HASH_KEYS:
+        return True
+    return normalized.endswith(("apikey", "token", "secret", "password", "passwd"))
 
 
 @dataclass(frozen=True)
@@ -184,6 +232,8 @@ class EvidenceBundle:
     tool_result_refs: tuple[EvidenceRef, ...] = ()
     check_refs: tuple[EvidenceRef, ...] = ()
     retrieval_refs: tuple[EvidenceRef, ...] = ()
+    approval_refs: tuple[EvidenceRef, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
 
     def __post_init__(self) -> None:
@@ -194,6 +244,29 @@ class EvidenceBundle:
         object.__setattr__(self, "tool_result_refs", _tuple_of_refs(self.tool_result_refs))
         object.__setattr__(self, "check_refs", _tuple_of_refs(self.check_refs))
         object.__setattr__(self, "retrieval_refs", _tuple_of_refs(self.retrieval_refs))
+        object.__setattr__(self, "approval_refs", _tuple_of_refs(self.approval_refs))
+        object.__setattr__(self, "metadata", _dict_copy(self.metadata))
+
+    @property
+    def refs(self) -> tuple[EvidenceRef, ...]:
+        """Return all refs in stable family order."""
+
+        return (
+            self.message_refs
+            + self.file_refs
+            + self.command_refs
+            + self.tool_result_refs
+            + self.check_refs
+            + self.retrieval_refs
+            + self.approval_refs
+        )
+
+    def has_refs(self, *kinds: EvidenceRefKind | str) -> bool:
+        """Return True when the bundle contains at least one ref for each kind."""
+
+        required = {EvidenceRefKind(kind) for kind in kinds}
+        present = {ref.kind for ref in self.refs}
+        return required.issubset(present)
 
 
 @dataclass(frozen=True)
