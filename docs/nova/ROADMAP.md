@@ -50,6 +50,7 @@ Deliverables:
 - Basic policy gate for future-affecting writes.
 - Schema-only artifact shells for reserved substrate types.
 - Persistent-mutation inventory across memory, skills, providers, plugins, background review, cron, config, session, and prompt/context paths.
+- `docs/nova/MUTATION_INVENTORY.md`.
 - Ledger concurrency contract for sequential and concurrent tool execution.
 - Replay/debug read surfaces for ledger entries.
 

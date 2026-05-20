@@ -37,7 +37,7 @@ Nova is not just memory, skills, hooks, checkpoints, or evals. Each exists in ad
 | Plugins/providers | Plugin and model-provider systems are discoverable and extensible [repo: model_tools.py:L175-L199] [repo: hermes_cli/plugins.py:L790-L930] [repo: providers/__init__.py:L1-L16]. | Plugin/provider outputs are untrusted unless gated. No adapter expansion in Phase 1. |
 | Checkpoints/logs | Checkpoints and logs support recovery and debugging [repo: tools/checkpoint_manager.py:L623-L657] [repo: hermes_logging.py:L156-L252]. | Checkpoints are not blame; ledger must identify which active artifact influenced a run. |
 
-Direct mutation paths to intercept or inventory first: memory tool writes, external memory provider sync/mirroring, skill management, background review, context-engine/session-end hooks, plugin hooks, cron jobs, session title/history mutations, config/plugin/provider changes, and file/tool writes that alter future agent behavior.
+Direct mutation paths to intercept or inventory first: memory tool writes, external memory provider sync/mirroring, skill management, background review, context-engine/session-end hooks, plugin hooks, cron jobs, session title/history mutations, config/plugin/provider changes, and file/tool writes that alter future agent behavior. The Phase 1 inventory is maintained in `docs/nova/MUTATION_INVENTORY.md`.
 
 ## Target Architecture
 
