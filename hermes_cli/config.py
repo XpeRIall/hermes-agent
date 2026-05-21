@@ -562,6 +562,21 @@ DEFAULT_CONFIG = {
         "mode": "disabled",
         # Empty uses the profile-scoped default: ~/.hermes/nova/kernel.db.
         "kernel_db_path": "",
+        # RES-11 experiment-only narrow SkillArtifact activation. Disabled by
+        # default; when enabled it activates at most one promoted skill artifact
+        # and writes an explicit activation log before prompt influence.
+        "skill_artifacts": {
+            "enabled": False,
+            "artifact_store_path": "",
+            "activation_log_path": "",
+            "repo_scope": "",
+            "benchmark_chain_id": "",
+            "explicit_artifact_id": "",
+            "exclude_artifact_ids": [],
+            "allowed_trust_states": ["active"],
+            "strict": True,
+            "require_match": True,
+        },
     },
 
     "terminal": {

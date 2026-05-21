@@ -2582,6 +2582,47 @@ class TestRunConversation:
         assert any(msg.get("role") == "user" and msg.get("content") == "search something" for msg in pre_request_calls[0]["request_messages"])
         assert all("usage" in c and "response" in c and "assistant_message" in c for c in post_request_calls)
 
+    def test_nova_skill_artifact_context_is_logged_before_api_and_not_persisted(self, agent):
+        self._setup_agent(agent)
+        activation_calls = []
+        captured_kwargs = []
+
+        class _Controller:
+            enabled = True
+
+            def activate_for_run(self, *, run_id, task_text, ledger=None):
+                activation_calls.append((run_id, task_text, ledger is not None))
+                return SimpleNamespace(
+                    context_block=(
+                        "[Nova SkillArtifact activation]\n"
+                        "artifact_id: artifact-1\n"
+                        "reviewed skill guidance\n"
+                        "[/Nova SkillArtifact activation]"
+                    )
+                )
+
+        def _api_call(api_kwargs):
+            captured_kwargs.append(api_kwargs)
+            assert activation_calls
+            return _mock_response(content="Final answer", finish_reason="stop")
+
+        agent._nova_skill_activation = _Controller()
+        with (
+            patch.object(agent, "_interruptible_api_call", side_effect=_api_call),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello", task_id="run-1")
+
+        assert result["final_response"] == "Final answer"
+        user_payload = [
+            msg for msg in captured_kwargs[0]["messages"] if msg.get("role") == "user"
+        ][-1]["content"]
+        assert "reviewed skill guidance" in user_payload
+        assert result["messages"][0]["content"] == "hello"
+        assert activation_calls == [("run-1", "hello", True)]
+
     def test_content_with_tool_calls_stays_silent_for_non_cli_quiet_mode(self, agent):
         self._setup_agent(agent)
         agent.platform = None

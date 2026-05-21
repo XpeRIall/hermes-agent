@@ -925,6 +925,7 @@ def init_agent(
         _ra().logger.warning("Tool loop guardrail config ignored: %s", _tlg_err)
     try:
         from agent.nova import KernelMode, NovaRecorder
+        from agent.nova.activation import build_skill_activation_controller_from_config
         _nova_cfg = _agent_cfg.get("nova", {}) if isinstance(_agent_cfg, dict) else {}
         _nova_mode = KernelMode(str(_nova_cfg.get("mode", "disabled") or "disabled").lower())
         _nova_db_path = _nova_cfg.get("kernel_db_path") or None
@@ -934,15 +935,22 @@ def init_agent(
             else NovaRecorder.disabled()
         )
         agent._nova_mode = _nova_mode
+        agent._nova_skill_activation = build_skill_activation_controller_from_config(
+            _agent_cfg,
+            cwd=os.getcwd(),
+        )
     except Exception as _nova_err:
         _ra().logger.warning("Nova recorder config ignored: %s", _nova_err)
         try:
             from agent.nova import KernelMode, NovaRecorder
+            from agent.nova.activation import DisabledSkillArtifactActivationController
             agent._nova_mode = KernelMode.DISABLED
             agent._nova_recorder = NovaRecorder.disabled()
+            agent._nova_skill_activation = DisabledSkillArtifactActivationController()
         except Exception:
             agent._nova_mode = "disabled"
             agent._nova_recorder = None
+            agent._nova_skill_activation = None
     # Cache only the derived auxiliary compression context override that is
     # needed later by the startup feasibility check.  Avoid exposing a
     # broad pseudo-public config object on the agent instance.
