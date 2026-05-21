@@ -297,6 +297,8 @@ def run_conversation(
     current_turn_user_idx = len(messages) - 1
     agent._persist_user_message_idx = current_turn_user_idx
     agent._nova_run_id = effective_task_id
+    agent._nova_skill_activation_context_block = ""
+    agent._nova_skill_activation_result = None
     try:
         recorder = getattr(agent, "_nova_recorder", None)
         if recorder is not None:
@@ -309,6 +311,20 @@ def run_conversation(
             )
     except Exception as _nova_err:
         logger.debug("Nova run-start recording failed: %s", _nova_err)
+    try:
+        controller = getattr(agent, "_nova_skill_activation", None)
+        if controller is not None and getattr(controller, "enabled", False):
+            activation_result = controller.activate_for_run(
+                run_id=effective_task_id,
+                task_text=original_user_message,
+                ledger=getattr(getattr(agent, "_nova_recorder", None), "ledger", None),
+            )
+            if activation_result is not None:
+                agent._nova_skill_activation_result = activation_result
+                agent._nova_skill_activation_context_block = activation_result.context_block
+    except Exception as _nova_err:
+        logger.error("Nova SkillArtifact activation failed closed: %s", _nova_err)
+        raise
 
     if not agent.quiet_mode:
         _print_preview = _summarize_user_message_for_log(user_message)
@@ -697,6 +713,9 @@ def run_conversation(
             # never mutated, so nothing leaks into session persistence.
             if idx == current_turn_user_idx and msg.get("role") == "user":
                 _injections = []
+                _nova_skill_context = getattr(agent, "_nova_skill_activation_context_block", "")
+                if _nova_skill_context:
+                    _injections.append(_nova_skill_context)
                 if _ext_prefetch_cache:
                     _fenced = build_memory_context_block(_ext_prefetch_cache)
                     if _fenced:
