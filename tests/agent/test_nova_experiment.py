@@ -188,3 +188,5 @@ def test_replay_adds_excluded_artifact_and_links_original_trial(tmp_path):
     assert result["replay"]["excluded_artifact_id"] == "artifact-1"
     assert result["manifest"]["metadata"]["replay_of"] == "nova_active-trial"
     assert result["manifest"]["exclude_artifact_ids"] == ["artifact-1"]
+    assert result["commands"][0]["argv"][0] == sys.executable
+    assert result["commands"][0]["returncode"] == 0

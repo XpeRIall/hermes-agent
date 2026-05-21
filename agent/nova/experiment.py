@@ -64,6 +64,13 @@ class CommandSpec:
         if value in (None, "", []):
             return None
         if isinstance(value, Mapping):
+            if "argv" in value:
+                return cls(
+                    name=str(value.get("name") or default_name),
+                    argv=tuple(str(part) for part in value.get("argv", ())),
+                    timeout_seconds=int(value.get("timeout_seconds", 300)),
+                    shell=bool(value.get("shell", False)),
+                )
             if "shell" in value:
                 return cls(
                     name=str(value.get("name") or default_name),
@@ -92,6 +99,8 @@ class CommandSpec:
                 capture_output=True,
                 shell=self.shell,
                 timeout=self.timeout_seconds,
+                encoding="utf-8",
+                errors="replace",
             )
             return {
                 "name": self.name,
@@ -99,8 +108,8 @@ class CommandSpec:
                 "shell": self.shell,
                 "returncode": completed.returncode,
                 "duration_seconds": time.time() - started,
-                "stdout_tail": _tail(completed.stdout),
-                "stderr_tail": _tail(completed.stderr),
+                "stdout_tail": _tail(completed.stdout or ""),
+                "stderr_tail": _tail(completed.stderr or ""),
                 "timed_out": False,
             }
         except subprocess.TimeoutExpired as exc:
@@ -467,6 +476,8 @@ def _read_json_or_yaml(path: Path) -> Any:
 
 
 def _tail(value: str, *, limit: int = 4000) -> str:
+    if value is None:
+        return ""
     text = value if isinstance(value, str) else value.decode("utf-8", errors="replace")
     return text[-limit:]
 
