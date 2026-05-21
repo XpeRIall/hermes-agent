@@ -53,6 +53,12 @@ class CommandSpec:
     timeout_seconds: int = 300
     shell: bool = False
 
+    def __post_init__(self) -> None:
+        if not self.argv:
+            raise ValueError("command argv cannot be empty")
+        if int(self.timeout_seconds) < 1:
+            raise ValueError("timeout_seconds must be positive")
+
     @classmethod
     def from_value(cls, value: Any, *, default_name: str) -> "CommandSpec | None":
         if value in (None, "", []):
@@ -242,11 +248,15 @@ def run_trial(manifest: TrialManifest, output_dir: str | Path) -> dict[str, Any]
                 status = TrialStatus.FAILED
                 reason = reason or "one or more checks failed"
 
-    activation_count = _activation_count(activation_log_path)
-    if status is TrialStatus.PASSED and manifest.activation_required and activation_count == 0:
+    activation_lines, valid_activation_count = _activation_log_counts(activation_log_path)
+    if (
+        status is TrialStatus.PASSED
+        and manifest.activation_required
+        and valid_activation_count == 0
+    ):
         status = TrialStatus.FAILED
-        reason = "nova_active arm produced no activation log"
-    if status is TrialStatus.PASSED and manifest.activation_forbidden and activation_count > 0:
+        reason = "nova_active arm produced no valid activation log"
+    if status is TrialStatus.PASSED and manifest.activation_forbidden and activation_lines > 0:
         status = TrialStatus.FAILED
         reason = "non-active arm produced activation metadata"
 
@@ -257,7 +267,8 @@ def run_trial(manifest: TrialManifest, output_dir: str | Path) -> dict[str, Any]
         "reason": reason,
         "manifest": manifest.to_record(),
         "commands": commands,
-        "activation_count": activation_count,
+        "activation_count": valid_activation_count,
+        "activation_log_lines": activation_lines,
         "hermes_home": str(hermes_home),
         "duration_seconds": time.time() - started,
         "metrics": {
@@ -299,6 +310,11 @@ def replay_trial(
     result["replay"] = {
         "original_trial_id": manifest.trial_id,
         "excluded_artifact_id": str(exclude_artifact_id),
+        "excluded_version_ids": [
+            artifact.version_id
+            for artifact in manifest.active_artifacts
+            if artifact.artifact_id == str(exclude_artifact_id)
+        ],
     }
     result_path = (
         Path(output_dir)
@@ -427,10 +443,20 @@ def _write_arm_config(
     (hermes_home / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=True), encoding="utf-8")
 
 
-def _activation_count(path: Path) -> int:
+def _activation_log_counts(path: Path) -> tuple[int, int]:
     if not path.exists():
-        return 0
-    return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
+        return 0, 0
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    valid = 0
+    required = {"artifact_id", "version_id", "activation_context_hash"}
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict) and required.issubset(record):
+            valid += 1
+    return len(lines), valid
 
 
 def _read_json_or_yaml(path: Path) -> Any:

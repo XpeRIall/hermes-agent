@@ -34,11 +34,32 @@ def test_nova_active_trial_fails_if_activation_log_is_missing(tmp_path):
     result = run_trial(_manifest(repo), tmp_path / "out")
 
     assert result["status"] == "failed"
-    assert result["reason"] == "nova_active arm produced no activation log"
+    assert result["reason"] == "nova_active arm produced no valid activation log"
     assert result["activation_count"] == 0
 
 
 def test_nova_active_trial_passes_only_with_real_activation_log(tmp_path):
+    repo = _repo(tmp_path)
+    code = (
+        "import os, pathlib; "
+        "p = pathlib.Path(os.environ['HERMES_HOME']) / 'nova' / "
+        "'skill_artifact_activations.jsonl'; "
+        "p.parent.mkdir(parents=True, exist_ok=True); "
+        "p.write_text("
+        "'{\"run_id\":\"r1\",\"artifact_id\":\"a1\",\"version_id\":\"v1\","
+        "\"activation_context_hash\":\"h1\"}\\n')"
+    )
+
+    result = run_trial(
+        _manifest(repo, command=[sys.executable, "-c", code]),
+        tmp_path / "out",
+    )
+
+    assert result["status"] == "passed"
+    assert result["activation_count"] == 1
+
+
+def test_nova_active_trial_rejects_malformed_activation_log(tmp_path):
     repo = _repo(tmp_path)
     code = (
         "import os, pathlib; "
@@ -53,8 +74,9 @@ def test_nova_active_trial_passes_only_with_real_activation_log(tmp_path):
         tmp_path / "out",
     )
 
-    assert result["status"] == "passed"
-    assert result["activation_count"] == 1
+    assert result["status"] == "failed"
+    assert result["activation_log_lines"] == 1
+    assert result["activation_count"] == 0
 
 
 def test_adjacent_only_trial_fails_if_nova_activation_metadata_appears(tmp_path):
